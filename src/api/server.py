@@ -1,14 +1,15 @@
-from fastapi import FastAPI, HTTPException 
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 from contextlib import asynccontextmanager
 from src.core.batcher import DynamicBatcher
 from src.models.nlp import NLPModel
 import uvicorn
-
+import os
 
 # config
-MAX_BATCH_SIZE =32
+MAX_BATCH_SIZE = 32
 MAX_LATENCY_MS = 10.0
-MODEL_NAME = "prajjwal1/bert-tiny"
+MODEL_NAME = "distilbert-base-uncased-finetuned-sst-2-english"
 batcher = None
 
 @asynccontextmanager
@@ -30,15 +31,16 @@ async def lifespan(app: FastAPI):
     print("shutting down...")
     await batcher.stop()
 
-
-class PredictRequest():
+class PredictRequest(BaseModel):
     # defines what the user must send us
     text: str
 
-class PredictResponse():
+class PredictResponse(BaseModel):
     # defines what we send back
     label: str
     score: float
+    
+app = FastAPI(lifespan=lifespan)
 
 @app.post("/predict", response_model=PredictResponse)
 async def predict(request: PredictRequest):
@@ -53,9 +55,6 @@ async def predict(request: PredictRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-
 if __name__ == "__main__":
-    app = FastAPI(lifespan=lifespan)
     # run the server on port 8000
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
