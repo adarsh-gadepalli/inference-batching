@@ -9,22 +9,28 @@ class NLPModel(BaseModel):
         self.model_name = model_name
         self.tokenizer = None
         self.model = None
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+
+        if torch.cuda.is_available():
+            self.device = "cuda"
+        elif torch.backends.mps.is_available():
+            self.device = "mps"
+        else:
+            self.device = "cpu"
 
     def load(self):
-        print(f"Loading model {self.model_name} on {self.device}...")
+        print(f"loading model {self.model_name} on {self.device}...")
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
         self.model = AutoModelForSequenceClassification.from_pretrained(self.model_name)
         self.model.to(self.device)
         self.model.eval()
-        print("Model loaded.")
+        print("model loaded.")
 
     @torch.inference_mode()
     def predict(self, texts: List[str]) -> List[Dict]:
         if not texts:
             return []
             
-        # Tokenize batch
+        # tokenize batch
         inputs = self.tokenizer(
             texts, 
             padding=True, 
@@ -33,11 +39,11 @@ class NLPModel(BaseModel):
             return_tensors="pt"
         ).to(self.device)
 
-        # Inference
+        # inference
         outputs = self.model(**inputs)
         probs = torch.nn.functional.softmax(outputs.logits, dim=-1)
         
-        # Format results
+        # format results
         results = []
         for prob in probs:
             score, label_idx = torch.max(prob, dim=0)
