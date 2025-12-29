@@ -13,6 +13,8 @@ class ContinuousRequest:
     input_ids: Any = None
     generated_tokens: List[int] = field(default_factory=list)
     finished: bool = False
+    # Track accumulated waste for averaging later
+    step_wastes: List[float] = field(default_factory=list)
 
 class ContinuousBatcher:
     def __init__(self, model, max_batch_size: int = 32):
@@ -75,6 +77,19 @@ class ContinuousBatcher:
                 # find max length in current active set to pad efficiently
                 current_input_ids = [req.input_ids for req in self.active_requests]
                 max_len = max(t.size(1) for t in current_input_ids)
+                
+                # METRIC: Calculate padding waste for this step
+                # Total cells = Batch Size * Max Len
+                # Active cells = Sum of lengths
+                total_capacity = len(current_input_ids) * max_len
+                active_cells = sum(t.size(1) for t in current_input_ids)
+                step_waste = 0.0
+                if total_capacity > 0:
+                    step_waste = 1.0 - (active_cells / total_capacity)
+                
+                # Record this waste for all active requests
+                for req in self.active_requests:
+                    req.step_wastes.append(step_waste)
 
                 padded_inputs = []
 
@@ -108,7 +123,11 @@ class ContinuousBatcher:
                         
                         # set result
                         full_text = self.model.tokenizer.decode(req.generated_tokens)
-                        req.future.set_result(full_text)
+                        
+                        # Average waste over the lifetime of this request
+                        avg_waste = sum(req.step_wastes) / len(req.step_wastes) if req.step_wastes else 0.0
+                        
+                        req.future.set_result((full_text, avg_waste))
 
                 # remove finished requests 
                 # they leave immediately, making room for queue items in the next loop iteration
@@ -124,4 +143,3 @@ class ContinuousBatcher:
                         req.future.set_exception(e)
                 self.active_requests = []
                 await asyncio.sleep(0.1)
-

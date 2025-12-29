@@ -1,6 +1,6 @@
 import asyncio
 import time
-from typing import List, Any, Optional
+from typing import List, Any, Optional, Tuple
 from dataclasses import dataclass, field
 
 @dataclass
@@ -99,6 +99,22 @@ class DynamicBatcher:
         # actually runs inference in the model
         inputs = [req.input_data for req in batch]
         
+        # Calculate waste metric:
+        # We need to know token lengths. We tokenize here or assume we have access.
+        # Since 'input_data' is just raw text, we technically tokenize inside model.predict.
+        # To calculate waste *accurately*, we'd tokenize here.
+        # HEURISTIC: Use string length as proxy for token length to be fast.
+        
+        # NOTE: This is an approximation. Ideally we tokenize first.
+        lengths = [len(s) for s in inputs] 
+        max_len = max(lengths) if lengths else 0
+        total_capacity = len(batch) * max_len
+        actual_content = sum(lengths)
+        
+        waste_ratio = 0.0
+        if total_capacity > 0:
+            waste_ratio = 1.0 - (actual_content / total_capacity)
+            
         try:
             # get the current event loop 
             loop = asyncio.get_running_loop()
@@ -109,8 +125,8 @@ class DynamicBatcher:
             # return answers back to the original requests
             for req, result in zip(batch, results):
                 if not req.future.done():
-                    # this wakes up the 'await request.future' in the predict method above
-                    req.future.set_result(result)
+                    # Return tuple (result, waste_ratio)
+                    req.future.set_result((result, waste_ratio))
                     
         except Exception as e:
             # if the batch fails, propagate the error to the requests

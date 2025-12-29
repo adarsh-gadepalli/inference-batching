@@ -19,10 +19,9 @@ TEST_TEXTS = [
     "Once upon a time",
     "Python is the best language because",
     "The weather today in Bastrop Texas is",
-    "The basketball player who changed the game the most in the last decade is",
+    "In a galaxy far far away",
     "When it comes to producing, Kaytranada ",
-    "The best city to live in America is", 
-    "The hardest part of being human is"
+    "The best city to live in America is"
 ]
 
 def kill_process_on_port(port: int):
@@ -36,7 +35,8 @@ def kill_process_on_port(port: int):
     except subprocess.CalledProcessError:
         pass
 
-async def send_request(session: aiohttp.ClientSession, url: str) -> Tuple[float, int]:
+async def send_request(session: aiohttp.ClientSession, url: str) -> Tuple[float, int, float]:
+    """Returns (latency, token_count, padding_waste)"""
     text = random.choice(TEST_TEXTS)
     start = time.time()
     async with session.post(url, json={"text": text}) as response:
@@ -44,11 +44,13 @@ async def send_request(session: aiohttp.ClientSession, url: str) -> Tuple[float,
         latency = time.time() - start
         
         # Estimate tokens (approx 1.3 tokens per word for English)
-        # This avoids needing the heavy tokenizer on the client side
         generated_text = data.get("result", "")
         est_tokens = int(len(generated_text.split()) * 1.3)
         
-        return latency, est_tokens
+        # Extract waste metric
+        waste = data.get("padding_waste", 0.0)
+        
+        return latency, est_tokens, waste
 
 async def run_load_test(name: str, num_requests: int, concurrency: int) -> Dict:
     print(f"\n[{name}] starting load test: {num_requests} requests, {concurrency} concurrency")
@@ -75,6 +77,7 @@ async def run_load_test(name: str, num_requests: int, concurrency: int) -> Dict:
         results_list = await asyncio.gather(*tasks)
         latencies = [r[0] for r in results_list]
         total_tokens = sum(r[1] for r in results_list)
+        waste_values = [r[2] for r in results_list]
         
         total_time = time.time() - start_total
         
@@ -82,6 +85,7 @@ async def run_load_test(name: str, num_requests: int, concurrency: int) -> Dict:
     p95_ms = statistics.quantiles(latencies, n=20)[18] * 1000
     throughput = num_requests / total_time
     tokens_per_sec = total_tokens / total_time
+    avg_waste = statistics.mean(waste_values)
     
     results = {
         "name": name,
@@ -89,6 +93,7 @@ async def run_load_test(name: str, num_requests: int, concurrency: int) -> Dict:
         "tokens_per_sec": round(tokens_per_sec, 2),
         "avg_latency_ms": round(avg_latency_ms, 2),
         "p95_latency_ms": round(p95_ms, 2),
+        "avg_padding_waste": round(avg_waste, 4),
         "total_time_sec": round(total_time, 2)
     }
     print(f"[{name}] results: {json.dumps(results, indent=2)}")
@@ -97,10 +102,6 @@ async def run_load_test(name: str, num_requests: int, concurrency: int) -> Dict:
 def run_server(batching_type: str, env_vars: Dict[str, str] = None) -> subprocess.Popen:
     env = os.environ.copy()
     env["BATCHING_TYPE"] = batching_type
-    
-    # Enable profiling for just one experiment if you want, or all
-    # Let's enable it by default for this run to capture the traces
-    env["ENABLE_PROFILING"] = "1"
     
     if env_vars:
         env.update(env_vars)
@@ -176,6 +177,8 @@ if __name__ == "__main__":
             "latency_none": res["none"]["avg_latency_ms"],
             "latency_dynamic": res["dynamic"]["avg_latency_ms"],
             "latency_continuous": res["continuous"]["avg_latency_ms"],
+            "waste_dynamic": res["dynamic"]["avg_padding_waste"],
+            "waste_continuous": res["continuous"]["avg_padding_waste"],
         }
         all_data.append(row)
 
