@@ -117,7 +117,7 @@ class ContinuousBatcher:
                     req.input_ids = torch.cat([req.input_ids, next_tokens_ids[i].view(1, 1)], dim=1)
                     
                     # check stop conditions (eos or length)
-                    if token_id == self.model.tokenizer.eos_token_id or len(req.generated_tokens) >= 20: # cap at 20 tokens for speed
+                    if token_id == self.model.tokenizer.eos_token_id or len(req.generated_tokens) >= 100: # cap at 100 tokens
                         req.finished = True
                         finished_indices.append(i)
                         
