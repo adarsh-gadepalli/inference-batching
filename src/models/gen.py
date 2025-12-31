@@ -1,6 +1,6 @@
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Union
 from .base import BaseModel
 
 class GenerativeModel(BaseModel):
@@ -30,19 +30,44 @@ class GenerativeModel(BaseModel):
         print("model loaded.")
 
     @torch.inference_mode()
-    def predict(self, texts: List[str]) -> List[str]:
-        """standard batch generation (dynamic batching use case)."""
-        if not texts:
+    def predict(self, inputs: Union[List[str], List[torch.Tensor]]) -> List[str]:
+        """standard batch generation (dynamic batching use case).
+           supports both raw text list and list of pre-tokenized tensors.
+        """
+        if not inputs:
             return []
             
-        inputs = self.tokenizer(
-            texts, 
-            padding=True, 
-            return_tensors="pt"
-        ).to(self.device)
+        if isinstance(inputs[0], str):
+            # tokenize on the fly (legacy behavior)
+            encoded = self.tokenizer(
+                inputs, 
+                padding=True, 
+                return_tensors="pt"
+            ).to(self.device)
+        else:
+            # assume list of 1d tensors, pad them manually
+            # find max length
+            max_len = max(t.size(0) for t in inputs)
+            padded_list = []
+            for t in inputs:
+                pad_len = max_len - t.size(0)
+                if pad_len > 0:
+                    # pad to the left? or right? standard batch generation usually pads left for generation,
+                    # but hf generate() handles right padding too if attention mask is correct.
+                    # let's right pad for simplicity as we are calling .generate() which handles it with attention mask usually,
+                    # but gpt2 usually likes left padding. let's stick to simple right padding for now or follow hf default.
+                    # actually, for batch generation, left padding is preferred.
+                    padded_list.append(torch.nn.functional.pad(t, (pad_len, 0), value=self.tokenizer.pad_token_id))
+                else:
+                    padded_list.append(t)
+            
+            encoded = {
+                "input_ids": torch.stack(padded_list).to(self.device),
+                "attention_mask": (torch.stack(padded_list) != self.tokenizer.pad_token_id).long().to(self.device)
+            }
         
         outputs = self.model.generate(
-            **inputs, 
+            **encoded, 
             max_new_tokens=self.max_length,
             pad_token_id=self.tokenizer.pad_token_id
         )
@@ -67,4 +92,3 @@ class GenerativeModel(BaseModel):
         next_tokens = torch.argmax(next_token_logits, dim=-1)
         
         return next_tokens, outputs.past_key_values
-

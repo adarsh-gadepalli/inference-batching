@@ -7,13 +7,13 @@ from dataclasses import dataclass, field
 @dataclass
 class ContinuousRequest:
     request_id: str
-    input_text: str
+    input_text: str = "" # optional now
     future: asyncio.Future = field(default_factory=asyncio.Future)
     # state for generation
-    input_ids: Any = None
+    input_ids: Any = None # passed in directly
     generated_tokens: List[int] = field(default_factory=list)
     finished: bool = False
-    # Track accumulated waste for averaging later
+    # track accumulated waste for averaging
     step_wastes: List[float] = field(default_factory=list)
 
 class ContinuousBatcher:
@@ -43,12 +43,13 @@ class ContinuousBatcher:
             except asyncio.CancelledError:
                 pass
 
-    async def predict(self, text: str) -> str:
+    async def predict(self, input_ids: torch.Tensor) -> str:
+        # expects pre-tokenized 1d tensor
 
         # puts request in queue and awaits answer
         req = ContinuousRequest(
             request_id=str(time.time()),
-            input_text=text
+            input_ids=input_ids
         )
         await self.queue.put(req)
         return await req.future
@@ -58,11 +59,16 @@ class ContinuousBatcher:
             # while we have room in the batch, pull from queue
             while len(self.active_requests) < self.max_batch_size and not self.queue.empty():
                 try:
-                    # get request and tokenize immediately
+                    # get request - no tokenization here anymore
                     req = self.queue.get_nowait()
-                    # tokenize immediately
-                    inputs = self.model.tokenizer(req.input_text, return_tensors="pt").to(self.model.device)
-                    req.input_ids = inputs.input_ids
+                    
+                    # ensure it's on the right device (might be cpu)
+                    if req.input_ids.device != self.model.device:
+                        req.input_ids = req.input_ids.to(self.model.device)
+                        
+                    # make sure it is 2d (1, seq_len)
+                    if req.input_ids.dim() == 1:
+                         req.input_ids = req.input_ids.unsqueeze(0)
 
                     # add to active set
                     self.active_requests.append(req)
@@ -78,16 +84,16 @@ class ContinuousBatcher:
                 current_input_ids = [req.input_ids for req in self.active_requests]
                 max_len = max(t.size(1) for t in current_input_ids)
                 
-                # METRIC: Calculate padding waste for this step
-                # Total cells = Batch Size * Max Len
-                # Active cells = Sum of lengths
+                # metric: calculate padding waste for this step
+                # total cells = batch size * max len
+                # active cells = sum of lengths
                 total_capacity = len(current_input_ids) * max_len
                 active_cells = sum(t.size(1) for t in current_input_ids)
                 step_waste = 0.0
                 if total_capacity > 0:
                     step_waste = 1.0 - (active_cells / total_capacity)
                 
-                # Record this waste for all active requests
+                # record this waste for all active requests
                 for req in self.active_requests:
                     req.step_wastes.append(step_waste)
 
@@ -105,7 +111,13 @@ class ContinuousBatcher:
                 batch_tensor = torch.cat(padded_inputs, dim=0)
                 
                 # run forward pass (generate 1 token)
-                next_tokens_ids, _ = self.model.generate_step(batch_tensor)
+                # fix: wrap in run_in_executor to avoid blocking loop
+                loop = asyncio.get_running_loop()
+                next_tokens_ids, _ = await loop.run_in_executor(
+                    None, 
+                    self.model.generate_step, 
+                    batch_tensor
+                )
                 
                 # process results and manage state
                 finished_indices = []
@@ -117,20 +129,20 @@ class ContinuousBatcher:
                     req.input_ids = torch.cat([req.input_ids, next_tokens_ids[i].view(1, 1)], dim=1)
                     
                     # check stop conditions (eos or length)
-                    if token_id == self.model.tokenizer.eos_token_id or len(req.generated_tokens) >= 100: # cap at 100 tokens
+                    if token_id == self.model.tokenizer.eos_token_id or len(req.generated_tokens) >= 20: # cap at 20 tokens for speed
                         req.finished = True
                         finished_indices.append(i)
                         
                         # set result
                         full_text = self.model.tokenizer.decode(req.generated_tokens)
                         
-                        # Average waste over the lifetime of this request
+                        # average waste over the lifetime of this request
                         avg_waste = sum(req.step_wastes) / len(req.step_wastes) if req.step_wastes else 0.0
                         
                         req.future.set_result((full_text, avg_waste))
 
                 # remove finished requests 
-                # they leave immediately, making room for queue items in the next loop iteration
+                # they leave immediately, making room for queue items next loop
                 for i in sorted(finished_indices, reverse=True):
                     self.active_requests.pop(i)
                     

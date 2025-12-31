@@ -56,7 +56,7 @@ class PredictRequest(BaseModel):
 
 class PredictResponse(BaseModel):
     result: str 
-    # Optional field for experimental metrics
+    # optional field for metrics
     padding_waste: float = 0.0
     
 app = FastAPI(lifespan=lifespan)
@@ -68,10 +68,16 @@ async def predict(request: PredictRequest):
             if not batcher:
                 raise HTTPException(status_code=503, detail="batcher not initialized")
             
-            # predict now returns (result_text, metric_dict) or just result_text
-            # We need to update the batchers to return this metadata
-            # For now, let's assume predict returns the text, and we'll refactor batchers next
-            result_obj = await batcher.predict(request.text)
+            # tokenize here to unblock batcher loop
+            # keep cpu work out of the consumer loop
+            if model.tokenizer:
+                input_ids = model.tokenizer.encode(request.text, return_tensors="pt").to(model.device).squeeze(0)
+                # pass tensor (1d) to batcher
+                result_obj = await batcher.predict(input_ids)
+            else:
+                 # fallback if no tokenizer
+                result_obj = await batcher.predict(request.text)
+
             
             if isinstance(result_obj, tuple):
                 return PredictResponse(result=str(result_obj[0]), padding_waste=result_obj[1])
@@ -85,7 +91,7 @@ async def predict(request: PredictRequest):
             
             loop = asyncio.get_running_loop()
             results = await loop.run_in_executor(None, model.predict, [request.text])
-            # No padding waste in batch size 1 (technically 0%, effectively irrelevant)
+            # no padding waste in batch size 1 (technically 0%, irrelevant)
             return PredictResponse(result=results[0], padding_waste=0.0)
             
     except Exception as e:

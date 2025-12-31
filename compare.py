@@ -59,8 +59,9 @@ async def run_load_test(name: str, num_requests: int, concurrency: int) -> Dict:
     
     await asyncio.sleep(40) # generous startup wait for gpt2 model loading
 
+    timeout = aiohttp.ClientTimeout(total=600)
     conn = aiohttp.TCPConnector(limit=concurrency)
-    async with aiohttp.ClientSession(connector=conn) as session:
+    async with aiohttp.ClientSession(connector=conn, timeout=timeout) as session:
         # warm up
         print(f"[{name}] warming up...")
         for _ in range(5):

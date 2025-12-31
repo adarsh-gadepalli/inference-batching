@@ -1,13 +1,13 @@
 import asyncio
 import time
-from typing import List, Any, Optional, Tuple
+from typing import List, Any, Optional
 from dataclasses import dataclass, field
 
 @dataclass
 class InferenceRequest:
     # simple container for a request, holds the input and the future result
     request_id: str
-    input_data: Any
+    input_data: Any # Can be text or Tensor now
     # future is a placeholder for a result that hasn't arrived yet
     future: asyncio.Future = field(default_factory=asyncio.Future)
     arrival_time: float = field(default_factory=time.time)
@@ -99,14 +99,16 @@ class DynamicBatcher:
         # actually runs inference in the model
         inputs = [req.input_data for req in batch]
         
-        # Calculate waste metric:
-        # We need to know token lengths. We tokenize here or assume we have access.
-        # Since 'input_data' is just raw text, we technically tokenize inside model.predict.
-        # To calculate waste *accurately*, we'd tokenize here.
-        # HEURISTIC: Use string length as proxy for token length to be fast.
+        # calculate waste metric:
+        # heuristic: use tensor shape or string len
         
-        # NOTE: This is an approximation. Ideally we tokenize first.
-        lengths = [len(s) for s in inputs] 
+        if hasattr(inputs[0], 'size'):
+             # it's a tensor (pre-tokenized)
+             lengths = [t.size(0) for t in inputs]
+        else:
+             # it's a string
+             lengths = [len(s) for s in inputs] 
+             
         max_len = max(lengths) if lengths else 0
         total_capacity = len(batch) * max_len
         actual_content = sum(lengths)
@@ -125,7 +127,7 @@ class DynamicBatcher:
             # return answers back to the original requests
             for req, result in zip(batch, results):
                 if not req.future.done():
-                    # Return tuple (result, waste_ratio)
+                    # return tuple (result, waste_ratio)
                     req.future.set_result((result, waste_ratio))
                     
         except Exception as e:
